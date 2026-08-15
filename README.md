@@ -1,7 +1,7 @@
-# Codex Question Sound for VS Code on macOS
+# Codex Question and Completion Sounds for VS Code on macOS
 
 An unofficial, macOS-only patch that adds audible alerts when the OpenAI Codex
-VS Code extension asks a question.
+VS Code extension asks a question or successfully completes a turn.
 
 > [!WARNING]
 > This project modifies the installed extension bundle. It is not affiliated
@@ -15,17 +15,20 @@ VS Code extension asks a question.
 - Stops both the repeating sound and automatic countdown as soon as the user
   interacts with the question card.
 - Stops the sound when the question is answered, resolved, or removed.
+- Plays the macOS `Glass` sound when a Codex turn completes successfully.
 - Creates a byte-for-byte backup before changing the extension bundle.
 
-The patch responds specifically to Codex `item/tool/requestUserInput` events.
-It does **not** add task-completion sounds or terminal permission-approval
+The patch responds specifically to Codex `item/tool/requestUserInput` and
+successful `turn/completed` events. It does **not** play a completion sound for
+interrupted or failed turns, and it does not add terminal permission-approval
 alerts.
 
 ## Platform and tested environment
 
 This project supports **macOS only** (the operating system formerly called Mac
-OS X). It uses the built-in `/usr/bin/afplay` command and the macOS system sound
-`/System/Library/Sounds/Tink.aiff`.
+OS X). It uses the built-in `/usr/bin/afplay` command and the macOS system
+sounds `/System/Library/Sounds/Tink.aiff` and
+`/System/Library/Sounds/Glass.aiff`.
 
 The current patch was developed and tested on:
 
@@ -43,7 +46,8 @@ macOS releases are currently untested.
 
 ## Requirements
 
-- macOS with `/usr/bin/afplay` and the `Tink.aiff` system sound.
+- macOS with `/usr/bin/afplay` and the `Tink.aiff` and `Glass.aiff` system
+  sounds.
 - Visual Studio Code with the official OpenAI Codex extension installed.
 - Python 3.10 or newer.
 - A standard VS Code extension directory at `~/.vscode/extensions`, or an
@@ -96,8 +100,9 @@ making an ambiguous modification.
 The script locates the active `openai.chatgpt` installation through VS Code's
 extension registry, reads `out/extension.js`, and patches the internal
 user-input auto-resolution coordinator. The injected JavaScript launches
-`afplay` for question events and owns one repeating timer per conversation.
-Question interaction, resolution, and cleanup cancel that timer.
+`afplay` for question and successful turn-completion events, and owns one
+repeating timer per conversation. Question interaction, resolution, and cleanup
+cancel that timer.
 
 All processing stays local. The project makes no network requests and collects
 no telemetry.
@@ -120,8 +125,8 @@ python3 -B -m unittest -v test_patch_codex_extension.py
   tracks the wider request for audible Codex notifications.
 
 Those tools cover broader notification workflows. This project is deliberately
-narrow: it targets timed question cards inside the Codex VS Code extension and
-stops the repeating alert on user interaction.
+narrow: it targets Codex question cards and successful turn completion inside
+the VS Code extension, while stopping timed-question alerts on user interaction.
 
 ## License
 
