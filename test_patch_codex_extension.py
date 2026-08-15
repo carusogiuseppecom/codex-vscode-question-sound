@@ -1,6 +1,13 @@
 import unittest
 
-from patch_codex_extension import PATCH_MARKER, PatchError, patch_source
+from patch_codex_extension import (
+    LEGACY_PATCH_MARKER,
+    ORIGINAL_NOTIFICATION_HANDLER,
+    PATCHED_NOTIFICATION_HANDLER,
+    PATCH_MARKER,
+    PatchError,
+    patch_source,
+)
 
 
 FIXTURE = (
@@ -8,6 +15,7 @@ FIXTURE = (
     'pendingRequestByConversationId=new Map;conversationIdByRequestId=new Map;'
     'observeServerRequest(e){if(e.method==="item/tool/requestUserInput")'
     '{let n=e.params.threadId;return}}'
+    f'{ORIGINAL_NOTIFICATION_HANDLER}'
     'snoozeRequest(e,r){let n=this.pendingRequestByConversationId.get(e);'
     'if(!(n==null||n.requestId!==r)){if(n.autoResolutionMs!=null)'
     '{this.startCountdown(e,n,n.autoResolutionMs);return}'
@@ -21,7 +29,7 @@ FIXTURE = (
 
 
 class PatchSourceTests(unittest.TestCase):
-    def test_adds_sound_and_stops_explicit_countdown(self) -> None:
+    def test_adds_question_and_successful_completion_sounds(self) -> None:
         patched, changed = patch_source(FIXTURE)
         self.assertTrue(changed)
         self.assertIn(PATCH_MARKER, patched)
@@ -29,6 +37,9 @@ class PatchSourceTests(unittest.TestCase):
         self.assertIn("this.startQuestionSound(e)", patched)
         self.assertIn("/usr/bin/afplay", patched)
         self.assertIn("/System/Library/Sounds/Tink.aiff", patched)
+        self.assertIn("/System/Library/Sounds/Glass.aiff", patched)
+        self.assertIn(PATCHED_NOTIFICATION_HANDLER, patched)
+        self.assertIn('e.params.turn?.status==="completed"', patched)
         self.assertNotIn("this.startCountdown(e,n,n.autoResolutionMs)", patched)
 
     def test_is_idempotent(self) -> None:
@@ -36,6 +47,31 @@ class PatchSourceTests(unittest.TestCase):
         patched_again, changed = patch_source(patched)
         self.assertFalse(changed)
         self.assertEqual(patched, patched_again)
+
+    def test_upgrades_version_1_without_duplicating_question_hooks(self) -> None:
+        version_2, _ = patch_source(FIXTURE)
+        version_1 = version_2.replace(PATCH_MARKER, LEGACY_PATCH_MARKER, 1)
+        completion_method_start = version_1.index("playCompletionSound()")
+        completion_method_end = version_1.index(
+            "startQuestionSound(e)", completion_method_start
+        )
+        version_1 = (
+            version_1[:completion_method_start]
+            + version_1[completion_method_end:]
+        ).replace(
+            PATCHED_NOTIFICATION_HANDLER,
+            ORIGINAL_NOTIFICATION_HANDLER,
+            1,
+        )
+
+        upgraded, changed = patch_source(version_1)
+
+        self.assertTrue(changed)
+        self.assertIn(PATCH_MARKER, upgraded)
+        self.assertNotIn(LEGACY_PATCH_MARKER, upgraded)
+        self.assertEqual(upgraded.count("this.playQuestionSound();"), 1)
+        self.assertEqual(upgraded.count("playCompletionSound()"), 2)
+        self.assertIn("/System/Library/Sounds/Glass.aiff", upgraded)
 
     def test_rejects_unknown_bundle(self) -> None:
         with self.assertRaisesRegex(

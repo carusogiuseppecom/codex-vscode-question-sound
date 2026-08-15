@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add an audible question alert to the installed Codex VS Code extension.
+"""Add audible alerts to the installed Codex VS Code extension.
 
 The patch is deliberately narrow: it changes only the request-user-input
 coordinator in OpenAI's extension bundle and keeps a byte-for-byte backup.
@@ -17,8 +17,48 @@ import tempfile
 
 
 EXTENSION_ID = "openai.chatgpt"
-PATCH_MARKER = "CODEX_QUESTION_SOUND_PATCH_V1"
+PATCH_MARKER = "CODEX_QUESTION_SOUND_PATCH_V2"
+LEGACY_PATCH_MARKER = "CODEX_QUESTION_SOUND_PATCH_V1"
 BACKUP_SUFFIX = ".codex-question-sound.original"
+
+ORIGINAL_NOTIFICATION_HANDLER = (
+    'observeServerNotification(e){if(e.method!=="serverRequest/resolved")return;'
+    'let r=e.params;this.stopTrackingRequest(r.requestId)}'
+)
+PATCHED_NOTIFICATION_HANDLER = (
+    'observeServerNotification(e){if(e.method==="turn/completed")'
+    '{e.params.turn?.status==="completed"&&this.playCompletionSound();return}'
+    'if(e.method!=="serverRequest/resolved")return;let r=e.params;'
+    'this.stopTrackingRequest(r.requestId)}'
+)
+
+
+def _sound_support(marker: str, include_completion: bool) -> str:
+    completion_sound = ""
+    if include_completion:
+        completion_sound = (
+            'playCompletionSound(){if(process.platform!=="darwin")return;try{'
+            'let e=require("node:child_process").spawn("/usr/bin/afplay",'
+            '["/System/Library/Sounds/Glass.aiff"],{stdio:"ignore"});'
+            'e.once("error",()=>{}),e.unref()}catch{}}'
+        )
+
+    return (
+        'nv=class{constructor(e){this.options=e}'
+        f'codexQuestionSoundPatch="{marker}";'
+        'questionSoundIntervals=new Map;'
+        'playQuestionSound(){if(process.platform!=="darwin")return;try{'
+        'let e=require("node:child_process").spawn("/usr/bin/afplay",'
+        '["/System/Library/Sounds/Tink.aiff"],{stdio:"ignore"});'
+        'e.once("error",()=>{}),e.unref()}catch{}}'
+        f'{completion_sound}'
+        'startQuestionSound(e){this.stopQuestionSound(e);'
+        'let r=setInterval(()=>this.playQuestionSound(),1e3);'
+        'r.unref?.(),this.questionSoundIntervals.set(e,r)}'
+        'stopQuestionSound(e){let r=this.questionSoundIntervals.get(e);'
+        'r!=null&&(clearInterval(r),this.questionSoundIntervals.delete(e))}'
+        'pendingRequestByConversationId=new Map;'
+    )
 
 
 class PatchError(RuntimeError):
@@ -40,81 +80,84 @@ def patch_source(source: str) -> tuple[str, bool]:
     if PATCH_MARKER in source:
         return source, False
 
-    class_start = (
-        'nv=class{constructor(e){this.options=e}'
-        'pendingRequestByConversationId=new Map;'
-    )
-    sound_support = (
-        'nv=class{constructor(e){this.options=e}'
-        f'codexQuestionSoundPatch="{PATCH_MARKER}";'
-        'questionSoundIntervals=new Map;'
-        'playQuestionSound(){if(process.platform!=="darwin")return;try{'
-        'let e=require("node:child_process").spawn("/usr/bin/afplay",'
-        '["/System/Library/Sounds/Tink.aiff"],{stdio:"ignore"});'
-        'e.once("error",()=>{}),e.unref()}catch{}}'
-        'startQuestionSound(e){this.stopQuestionSound(e);'
-        'let r=setInterval(()=>this.playQuestionSound(),1e3);'
-        'r.unref?.(),this.questionSoundIntervals.set(e,r)}'
-        'stopQuestionSound(e){let r=this.questionSoundIntervals.get(e);'
-        'r!=null&&(clearInterval(r),this.questionSoundIntervals.delete(e))}'
-        'pendingRequestByConversationId=new Map;'
-    )
-    source = _replace_once(
-        source, class_start, sound_support, "the user-input request coordinator"
-    )
+    if LEGACY_PATCH_MARKER in source:
+        source = _replace_once(
+            source,
+            _sound_support(LEGACY_PATCH_MARKER, include_completion=False),
+            _sound_support(PATCH_MARKER, include_completion=True),
+            "the version 1 sound support",
+        )
+    else:
+        class_start = (
+            'nv=class{constructor(e){this.options=e}'
+            'pendingRequestByConversationId=new Map;'
+        )
+        source = _replace_once(
+            source,
+            class_start,
+            _sound_support(PATCH_MARKER, include_completion=True),
+            "the user-input request coordinator",
+        )
 
-    request_start = (
-        'observeServerRequest(e){if(e.method==="item/tool/requestUserInput")'
-        '{let n=e.params.threadId;'
-    )
+        request_start = (
+            'observeServerRequest(e){if(e.method==="item/tool/requestUserInput")'
+            '{let n=e.params.threadId;'
+        )
+        source = _replace_once(
+            source,
+            request_start,
+            request_start + "this.playQuestionSound();",
+            "the Codex question event handler",
+        )
+
+        old_snooze = (
+            'snoozeRequest(e,r){let n=this.pendingRequestByConversationId.get(e);'
+            'if(!(n==null||n.requestId!==r)){if(n.autoResolutionMs!=null)'
+            '{this.startCountdown(e,n,n.autoResolutionMs);return}'
+            'this.cancelPendingRequestDeadline(n),n.resolutionState='
+            '{status:"snoozed"},this.publishState(e,n)}}'
+        )
+        new_snooze = (
+            'snoozeRequest(e,r){let n=this.pendingRequestByConversationId.get(e);'
+            'if(!(n==null||n.requestId!==r)){this.cancelPendingRequestDeadline(n),'
+            'n.resolutionState={status:"snoozed"},this.publishState(e,n)}}'
+        )
+        source = _replace_once(
+            source,
+            old_snooze,
+            new_snooze,
+            "the question interaction handler",
+        )
+
+        countdown_tail = (
+            'break}}),this.publishState(e,r)}setPendingRequestTimeout'
+        )
+        source = _replace_once(
+            source,
+            countdown_tail,
+            'break}}),this.startQuestionSound(e),this.publishState(e,r)}'
+            'setPendingRequestTimeout',
+            "the countdown start handler",
+        )
+
+        cancel_deadline = (
+            'cancelPendingRequestDeadline(e){let r=e.timeoutId;'
+            'r!=null&&(e.timeoutId=null,clearTimeout(r))}'
+        )
+        source = _replace_once(
+            source,
+            cancel_deadline,
+            'cancelPendingRequestDeadline(e){this.stopQuestionSound('
+            'this.conversationIdByRequestId.get(e.requestId)??"");'
+            'let r=e.timeoutId;r!=null&&(e.timeoutId=null,clearTimeout(r))}',
+            "the countdown cancellation handler",
+        )
+
     source = _replace_once(
         source,
-        request_start,
-        request_start + "this.playQuestionSound();",
-        "the Codex question event handler",
-    )
-
-    old_snooze = (
-        'snoozeRequest(e,r){let n=this.pendingRequestByConversationId.get(e);'
-        'if(!(n==null||n.requestId!==r)){if(n.autoResolutionMs!=null)'
-        '{this.startCountdown(e,n,n.autoResolutionMs);return}'
-        'this.cancelPendingRequestDeadline(n),n.resolutionState='
-        '{status:"snoozed"},this.publishState(e,n)}}'
-    )
-    new_snooze = (
-        'snoozeRequest(e,r){let n=this.pendingRequestByConversationId.get(e);'
-        'if(!(n==null||n.requestId!==r)){this.cancelPendingRequestDeadline(n),'
-        'n.resolutionState={status:"snoozed"},this.publishState(e,n)}}'
-    )
-    source = _replace_once(
-        source,
-        old_snooze,
-        new_snooze,
-        "the question interaction handler",
-    )
-
-    countdown_tail = (
-        'break}}),this.publishState(e,r)}setPendingRequestTimeout'
-    )
-    source = _replace_once(
-        source,
-        countdown_tail,
-        'break}}),this.startQuestionSound(e),this.publishState(e,r)}'
-        'setPendingRequestTimeout',
-        "the countdown start handler",
-    )
-
-    cancel_deadline = (
-        'cancelPendingRequestDeadline(e){let r=e.timeoutId;'
-        'r!=null&&(e.timeoutId=null,clearTimeout(r))}'
-    )
-    source = _replace_once(
-        source,
-        cancel_deadline,
-        'cancelPendingRequestDeadline(e){this.stopQuestionSound('
-        'this.conversationIdByRequestId.get(e.requestId)??"");'
-        'let r=e.timeoutId;r!=null&&(e.timeoutId=null,clearTimeout(r))}',
-        "the countdown cancellation handler",
+        ORIGINAL_NOTIFICATION_HANDLER,
+        PATCHED_NOTIFICATION_HANDLER,
+        "the server notification handler",
     )
 
     return source, True
@@ -198,7 +241,7 @@ def restore_extension(extension_dir: Path, dry_run: bool = False) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Add audible Codex question alerts to VS Code on macOS."
+        description="Add audible Codex question and completion alerts on macOS."
     )
     parser.add_argument(
         "--extension-dir",
